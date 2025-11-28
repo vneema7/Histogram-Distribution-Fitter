@@ -24,12 +24,6 @@ section[data-testid="stSidebar"] * {
 # 1) DATA INPUT (SIDEBAR)
 # ---------------------------
 with st.sidebar:
-    try:
-        st.image("wallpaper.jpg", use_container_width=True)
-    except:
-        pass
-
-    st.markdown("Project1")
     st.header("Data Input")
 
     mode = st.radio("Choose input method:", ["Manual entry", "Upload CSV"])
@@ -43,9 +37,9 @@ with st.sidebar:
         try:
             tokens = raw.replace(",", " ").split()
             data = np.array([float(x) for x in tokens], dtype=float)
-        except:
+        except Exception:
             st.error("Couldn't parse numbers. Fix your input.")
-
+            data = None
     else:
         file = st.file_uploader("Upload a CSV file", type=["csv"])
         if file is not None:
@@ -90,6 +84,8 @@ if "dist_name" not in st.session_state:
     st.session_state.dist_name = list(DIST_MAP.keys())[0]
 if "bins" not in st.session_state:
     st.session_state.bins = 30
+if "last_dist_name" not in st.session_state:
+    st.session_state.last_dist_name = st.session_state.dist_name
 
 COLOR_MAP = {
     "White": "white",
@@ -113,11 +109,18 @@ COLOR_MAP = {
 top_left, top_right = st.columns([1.2, 1])
 with top_left:
     st.subheader("Distribution Selection")
-    st.session_state.dist_name = st.selectbox(
+    dist_choice = st.selectbox(
         "Choose distribution to fit:",
         list(DIST_MAP.keys()),
         index=list(DIST_MAP.keys()).index(st.session_state.dist_name)
     )
+
+    # If user changed the distribution, reset auto_params
+    if dist_choice != st.session_state.last_dist_name:
+        st.session_state.auto_params = None  # kills old fit
+        st.session_state.last_dist_name = dist_choice
+
+    st.session_state.dist_name = dist_choice
 
 with top_right:
     st.subheader("Histogram Control")
@@ -190,27 +193,34 @@ with plot_tab:
     with col2:
         st.subheader("Auto-Fit Plot")
 
-        fig, ax = plt.subplots(figsize=(7, 4.5))
-        ax.set_facecolor(bg_color)
-        fig.patch.set_facecolor("white")
-
-        ax.hist(
-            data, bins=bins, density=True,
-            alpha=0.65, edgecolor="black",
-            color=hist_color
-        )
-
-        x = np.linspace(data.min(), data.max(), 600)
         auto_params = st.session_state.auto_params
 
-        if auto_params is not None:
-            pdf = dist.pdf(x, *auto_params)
-            ax.plot(x, pdf, color=line_color, linewidth=2.5, label=f"{dist_name} auto-fit")
-            ax.legend()
+        # NEW: no graph unless Auto-fit has run successfully
+        if auto_params is None:
+            st.info("Select a distribution and click **Auto-fit distribution** to see the plot.")
+        else:
+            fig, ax = plt.subplots(figsize=(7, 4.5))
+            ax.set_facecolor(bg_color)
+            fig.patch.set_facecolor("white")
 
-        ax.set_xlabel("Value")
-        ax.set_ylabel("Density")
-        st.pyplot(fig)
+            ax.hist(
+                data, bins=bins, density=True,
+                alpha=0.65, edgecolor="black",
+                color=hist_color
+            )
+
+            x = np.linspace(data.min(), data.max(), 600)
+
+            try:
+                pdf = dist.pdf(x, *auto_params)
+                ax.plot(x, pdf, color=line_color, linewidth=2.5, label=f"{dist_name} auto-fit")
+                ax.legend()
+            except Exception as e:
+                st.error(f"Error plotting auto-fit: {e}")
+
+            ax.set_xlabel("Value")
+            ax.set_ylabel("Density")
+            st.pyplot(fig)
 
 # ---------------------------
 # 3) FIT RESULTS + QUALITY
@@ -219,7 +229,7 @@ st.subheader("Fit Results")
 
 auto_params = st.session_state.auto_params
 if auto_params is None:
-    st.info("Run Auto-fit to see parameters and fit quality.")
+    st.info("Run **Auto-fit distribution** to see parameters and fit quality.")
 else:
     st.write("Auto-fit parameters (shape(s), loc, scale):")
     st.code(auto_params)
@@ -227,7 +237,12 @@ else:
     # Histogram density vs PDF at bin centers
     hist_y, edges = np.histogram(data, bins=bins, density=True)
     centers = 0.5 * (edges[:-1] + edges[1:])
-    pdf_centers = dist.pdf(centers, *auto_params)
+
+    try:
+        pdf_centers = dist.pdf(centers, *auto_params)
+    except Exception as e:
+        st.error(f"Error evaluating PDF at bin centers: {e}")
+        pdf_centers = np.zeros_like(centers)
 
     err = np.abs(hist_y - pdf_centers)
     mae = float(err.mean())
@@ -245,8 +260,8 @@ else:
         ll = float(np.sum(dist.logpdf(data, *auto_params)))
         k = len(auto_params)
         n = len(data)
-        aic = float(2*k - 2*ll)
-        bic = float(k*np.log(n) - 2*ll)
+        aic = float(2 * k - 2 * ll)
+        bic = float(k * np.log(n) - 2 * ll)
     except Exception:
         ll, aic, bic = np.nan, np.nan, np.nan
 
@@ -277,58 +292,70 @@ else:
 # ---------------------------
 with manual_tab:
     st.subheader("Manual Fitting (sliders)")
-    st.markdown("<div class='small-note'>Sliders start from auto-fit if available.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='small-note'>Sliders use the current auto-fit as a starting point.</div>", unsafe_allow_html=True)
 
-    # Base on auto-fit if present, else fresh fit
-    base_params = auto_params if auto_params is not None else dist.fit(data)
+    auto_params = st.session_state.auto_params
 
-    shapes = base_params[:-2]
-    loc0, scale0 = base_params[-2], base_params[-1]
+    if auto_params is None:
+        st.info("Run **Auto-fit distribution** first, then come back here for manual tuning.")
+    else:
+        base_params = auto_params
 
-    manual_shapes = []
-    shape_names = [f"shape_{i+1}" for i in range(len(shapes))]
+        shapes = base_params[:-2]
+        loc0, scale0 = base_params[-2], base_params[-1]
 
-    cA, cB = st.columns(2)
+        manual_shapes = []
+        shape_names = [f"shape_{i+1}" for i in range(len(shapes))]
 
-    with cA:
-        for name, val in zip(shape_names, shapes):
-            v = float(val)
-            span = max(1.0, 5.0 * abs(v))
-            low = v - span
-            high = v + span
-            manual_shapes.append(
-                st.slider(name, low, high, v)
+        cA, cB = st.columns(2)
+
+        with cA:
+            for name, val in zip(shape_names, shapes):
+                v = float(val)
+                span = max(1.0, 5.0 * abs(v))
+                low = v - span
+                high = v + span
+                manual_shapes.append(
+                    st.slider(name, low, high, v)
+                )
+
+        with cB:
+            std = float(np.std(data)) if np.std(data) > 0 else 1.0
+            manual_loc = st.slider("loc", float(loc0 - 5 * std), float(loc0 + 5 * std), float(loc0))
+            manual_scale = st.slider(
+                "scale",
+                1e-6,
+                float(max(scale0 * 5, 1e-3)),
+                float(max(scale0, 1e-3))
             )
 
-    with cB:
-        std = float(np.std(data)) if np.std(data) > 0 else 1.0
-        manual_loc = st.slider("loc", float(loc0 - 5*std), float(loc0 + 5*std), float(loc0))
-        manual_scale = st.slider("scale", 1e-6, float(max(scale0*5, 1e-3)), float(max(scale0, 1e-3)))
+        manual_params = tuple(manual_shapes + [manual_loc, manual_scale])
 
-    manual_params = tuple(manual_shapes + [manual_loc, manual_scale])
+        # Manual plot with same styling
+        fig2, ax2 = plt.subplots(figsize=(7, 4.5))
+        ax2.set_facecolor(bg_color)
+        fig2.patch.set_facecolor("white")
 
-    # Manual plot with same styling
-    fig2, ax2 = plt.subplots(figsize=(7, 4.5))
-    ax2.set_facecolor(bg_color)
-    fig2.patch.set_facecolor("white")
+        ax2.hist(
+            data, bins=bins, density=True,
+            alpha=0.65, edgecolor="black",
+            color=hist_color
+        )
 
-    ax2.hist(
-        data, bins=bins, density=True,
-        alpha=0.65, edgecolor="black",
-        color=hist_color
-    )
+        x = np.linspace(data.min(), data.max(), 600)
+        try:
+            ax2.plot(
+                x, dist.pdf(x, *manual_params),
+                color=line_color, linewidth=2.5,
+                label=f"{dist_name} manual"
+            )
+        except Exception as e:
+            st.error(f"Error plotting manual fit: {e}")
 
-    x = np.linspace(data.min(), data.max(), 600)
-    ax2.plot(
-        x, dist.pdf(x, *manual_params),
-        color=line_color, linewidth=2.5,
-        label=f"{dist_name} manual"
-    )
+        ax2.set_xlabel("Value")
+        ax2.set_ylabel("Density")
+        ax2.legend()
+        st.pyplot(fig2)
 
-    ax2.set_xlabel("Value")
-    ax2.set_ylabel("Density")
-    ax2.legend()
-    st.pyplot(fig2)
-
-    st.write("Manual parameters (shape(s), loc, scale):")
-    st.code(manual_params)
+        st.write("Manual parameters (shape(s), loc, scale):")
+        st.code(manual_params)
